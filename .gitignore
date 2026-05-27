@@ -1,0 +1,44 @@
+# ==========================================================
+# Git Ignore Config for DeepResearch Multi-Agent System
+# ==========================================================
+
+# 1. 敏感配置与密钥（绝对禁止推送到 GitHub）
+.env
+config.json
+
+# 2. Python 编译文件与缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 3. 本地数据库与临时测试数据
+*.db
+*.sqlite
+.system_generated/
+scratch/
+
+# 4. 编辑器与集成开发环境（IDE）配置文件
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# 5. 系统生成的文件与日志
+output/
+logs/
+*.log
+
+# 6. 虚拟环境与依赖包文件夹
+venv/
+.venv/
+env/
+dist/
+build/
+*.egg-info/
