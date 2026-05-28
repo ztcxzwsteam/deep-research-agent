@@ -1,20 +1,51 @@
-# DeepResearch 企业级多智能体系统：技术 Specification 与源码研读全景指南
+# DeepResearch 企业级多智能体深度调研系统 🚀
 
-本项目是一个基于 **LangGraph**、**FastAPI** 和 **Vue 3** 构建的企业级多智能体深度调研（DeepResearch）系统。系统采用证据驱动（Evidence-Driven）的设计思想，融合了网络实时检索（Tavily API）与本地企业知识库（Milvus RAG），并在底座中构建了精细的双层记忆系统（短期会话 Checkpoint + 长期语义/情景记忆）。
+[![LangGraph](https://img.shields.io/badge/Framework-LangGraph-blue.svg)](https://github.com/langchain-ai/langgraph)
+[![FastAPI](https://img.shields.io/badge/Backend-FastAPI-green.svg)](https://fastapi.tiangolo.com/)
+[![Database-Milvus](https://img.shields.io/badge/VectorDB-Milvus-orange.svg)](https://milvus.io/)
+[![LLM-DeepSeek](https://img.shields.io/badge/LLM-DeepSeek-red.svg)](https://www.deepseek.com/)
 
-本篇技术规范文档旨在为系统架构师与高级开发人员提供一份**生产级技术规范（Specification）与源码研读手册**，全景解构其拓扑状态机、信源裁判算法、数据流并发模型及多维度存储逻辑隔离机制。
+本项目是一个基于 **LangGraph**、**FastAPI** 和 **Vue 3 / React** 构建的企业级多智能体深度调研（DeepResearch）系统。系统采用证据驱动（Evidence-Driven）的设计思想，融合了网络实时检索（Tavily API）与本地企业知识库（Milvus RAG），并在底座中构建了精细的**双层记忆系统**与**角色级专属工具链**，为复杂业务场景下的深度搜索与学术级研报撰写提供稳健、高品质的工程实现。
 
 ---
 
-## 一、 多智能体协同与工具流全景架构 (Multi-Agent Collaboration & Tool Flow Spec)
+## 🌟 核心技术亮点与架构演进
 
-本系统的核心是以 **LangGraph** 为底座构建的**有状态多智能体协同 network**。各智能体角色（Persona）通过读写共享状态机沙盒 `ResearchState` 传递上下文，并在执行节点中调用高度安全的物理工具链。
+### 1. 生产级双层记忆系统（Dual-Layer Memory & LLM Fallback）
+系统提供统一的记忆网关 `MemoryManager`，完美分离了短期工作记忆与长期经验记忆：
+* **短期工作记忆 (Thread-Level Checkpointer)**：利用 **LangGraph Checkpointer**，自适应支持 **PostgreSQL / Redis (物理 6380 端口物理隔离)** 或内存数据库，在后台为每个 `thread_id` 自动保存每一步的状态快照。若发生停电或网络闪断，系统能实现毫秒级的**断点续传（Resume）**，并完美支持多路并发合流。
+* **长期认知记忆 (Long-Term Cognitive Memory)**：
+  * **结构化 LLM 提取**：在每轮会话清算阶段，系统通过 **DeepSeek (deepseek-chat) 生产级接口**，运行精心设计的**【认知提炼专家 Prompt】**，从原始对话中自动剥离并去重事实（facts）与用户偏好（preferences），写入 SQLite 关系数据库。
+  * **鲁棒本地规则降级 (Regex Fallback)**：我们设计了完备的异常处理。一旦 DeepSeek 官方 API 发生网络抖动或超时，系统将**自动且无感地降级至本地的正则表达式与关键词匹配引擎**，保障 100% 的写入可用性。
+  * **跨会话自动注入**：当该用户在任何新窗口（New Thread）提问时，系统会基于 `user_id` 自动从长期记忆库（SQLite / Milvus）中召回专属画像上下文，实现跨时空的个性化问答。
 
-以下为以**多智能体系统为主、工具流调用为骨架**的全景协作与工具流拓扑图：
+### 2. 语义与检索解耦：RAG 上下文合并召回（Window Buffer Retrieval）
+为了防止传统 RAG 在检索时“断章取义”导致大模型出现幻觉，我们在 `app/mult_agents/rag/core.py` 中实现了先进的滑动窗口拼接技术：
+* **动态 Schema 探测**：自适应提取 Milvus 集合的 Schema 结构，动态获取主键字段名称（如 `pk` 或 `id`），完美兼容各种版本的 `LangChain Milvus` 封装。
+* **物理相邻多路召回**：当向量相似度精准命中某个 500 字的核心 Chunks 后，提取其物理主键 `pk`，自动使用高性能过滤条件 `expr = f"{pk_field} in [{pk - 1}, {pk + 1}]"`，拉取其在物理上紧邻的**前一个和后一个 Chunks**。
+* **数据一致性防线 (Document Consistency Guardrail)**：
+  * 系统在拼接前，会严格对比邻近分片与核心分片的元数据 `source`（物理文件绝对路径）。
+  * **只有当它们被验证属于同一个物理来源文件时，才允许拼接**。这绝对防止了跨文件（如两个完全不同的财务报告）的断章碎块强行粘合造成的语义污染。
+* **时序无缝缝合**：将通过一致性校验的前文（`pk-1`）、正文（`pk`）与后文（`pk+1`）按照主键 ID 升序排序，中间用虚线指示符拼接，为下游 Agent 递送 **1500 字左右极其连贯的滑动大视界窗口上下文**。
+
+### 3. 角色级专属工具绑定（Cognitive Separation of Concerns）
+在多智能体系统中，盲目将所有工具塞给每个 Agent 会造成“认知过载”并大幅拖慢运行速度。我们采用**“职责分离，精准绑定”**的设计，在 `main.py` 的 `build_agents` 实例化工厂中，为各个角色量身定制了专属武器库：
+* **`intent_router` (门卫) & `planner` (规划师)** ➡️ **时间感知工具** (`get_current_time`)：使其能准确识别“今年”、“今天”等时效概念，防止时间发生错乱。
+* **`scout_web` (网络侦查兵)** ➡️ **网络高精搜网套件** (`web_search_stub` + 高德地图天气、定位、周边、驾车路径规划四件套)：代替模糊的网页搜索，直接调用高精度官方 API 召回结构化事实。
+* **`scout_local` (私有库侦查兵)** ➡️ **私有知识库检索工具** (`local_docs_lookup_stub`)：专注于在本地 Milvus 集合中召回机密知识。
+* **`analyst` (推理分析师)** ➡️ **理科运算与数据加载工具** (`simple_calculator` + `extract_data_stub` + `sql_inter` 只读 SQL)：具备极高精度的算术、Pandas 表格分析和数据库查询能力。
+* **`codegen` (代码生成器)** ➡️ **全栈 AI 程序员套件** (`python_inter` 安全沙箱 + 工作区文件安全读写五件套 + 终端安全命令执行器)：让它能在安全的沙箱里真正运行自己写的代码、自我修改 Bug、查看当前工作空间目录，并使用 `pip list`, `git status` 进行环境自检。
+* **`writer` (撰写器)** ➡️ **学术加工与矢量绘图套件** (`fig_inter` 高保真画图 + 文本去重、提炼、合并五件套)：使它在生成精美 Markdown 报告的同时，能自动利用 Python Matplotlib 绘制数据图表，并快速清洗去重搜集来的粗糙素材。
+
+---
+
+## 🗺️ 多智能体协同与工具流全景拓扑 (Topology)
+
+系统中的各智能体通过读写共享状态机沙盒 `ResearchState` 传递上下文，并在执行节点中调度其专属工具：
 
 ```mermaid
 graph TD
-    %% 样式与类定义 (显式指定高对比度暗色文字，防止在深色/暗黑模式下因文字变白导致对比度极低而看不清)
+    %% 样式与类定义
     classDef state fill:#f7fafc,stroke:#4a5568,stroke-width:1.5px,color:#1a202c;
     classDef agent fill:#ebf8ff,stroke:#3182ce,stroke-width:2px,color:#1a202c;
     classDef tool fill:#fffaf0,stroke:#dd6b20,stroke-width:1.5px,color:#1a202c;
@@ -24,7 +55,7 @@ graph TD
     State["ResearchState 共享状态机沙盒<br>存储: query, plan, evidence, findings, gaps, checkpoints"]:::state
 
     %% 智能体节点 (专家角色)
-    Agent_Intent["【意图分流专家】<br>Intent Router 【intent_node】"]:::agent
+    Agent_Intent["【意图分流门卫】<br>Intent Router 【intent_node】"]:::agent
     Agent_Direct["【极速直答专家】<br>Direct Responder 【direct_answer_node】"]:::agent
     Agent_Architect["【总规划师】<br>Chief Architect 【plan_node】"]:::agent
     Agent_WebScout["【网页侦查兵】<br>Web Scout 【web_search_node】"]:::agent
@@ -34,21 +65,20 @@ graph TD
     Agent_Planner["【补搜规划专家】<br>Research Planner 【reflect_node】"]:::agent
     Agent_Writer["【终审写作者】<br>Senior Writer 【write_node】"]:::agent
 
-    %% 物理工具库 (具体函数)
-    Tool_Detect["detect_intent【】 规则意图识别"]:::tool
-    Tool_Derive["_derive_search_plan【】 计划派生"]:::tool
-    Tool_Tavily["tavily_web_search_records【】 实时网搜"]:::tool
-    Tool_WebScrape["extract_url_content_stub【】 网页深度解析"]:::tool
-    Tool_Milvus["search_knowledge_base_records【】 局内检索"]:::tool
-    Tool_Score["_score_evidence【】 信用评级与冲突审计"]:::tool
-    Tool_Optimize["optimize_query【】 检索词启发式改写"]:::tool
-    Tool_Clean["_validate_and_fix_citations【】 防幻觉引用清洗"]:::tool
-    Tool_Render["_render_reference_list【】 学术级去重文献生成"]:::tool
+    %% 物理工具库
+    Tool_Time["get_current_time 时间感知"]:::tool
+    Tool_Tavily["tavily_web_search_records 实时网搜"]:::tool
+    Tool_Amap["amap_* 高德地图高精套件"]:::tool
+    Tool_Milvus["search_knowledge_base_records 局内检索<br>+ Window Buffer 上下文拼接"]:::tool
+    Tool_Score["_score_evidence 信源分级打分与冲突审计"]:::tool
+    Tool_Data["extract_data_stub / sql_inter<br>Pandas与只读SQL数据挖掘"]:::tool
+    Tool_Sandbox["python_inter / safe_*<br>安全代码沙箱与工作区文件管理"]:::tool
+    Tool_Render["fig_inter Matplotlib矢量绘图"]:::tool
 
     %% 外部物理基础设施
     Ext_Tavily["Tavily Search API Cloud"]:::ext
     Ext_Milvus["Milvus RAG Vector DB"]:::ext
-    Ext_Postgres["PostgreSQL DB 【长期情景记忆】"]:::ext
+    Ext_SQLite["SQLite / PostgreSQL 【长期个人记忆】"]:::ext
 
     %% --------------------------------------------------
     %% 协作与工具流连线
@@ -56,241 +86,174 @@ graph TD
     
     %% 1. 启动与分流
     State -->|1. 读写共享状态| Agent_Intent
-    Agent_Intent -.->|调用工具| Tool_Detect
     Agent_Intent -->|意图=direct 【闲聊/直答】| Agent_Direct
     Agent_Intent -->|意图=multiagent 【深度调研】| Agent_Architect
-
-    %% 2. 任务规划
-    Agent_Architect -.->|调用工具| Tool_Derive
-    Tool_Derive -->|自动拆解并派生 search_plan| State
-
-    %% 3. 并发双源取证 (控制流实线, 工具调用虚线)
+    Agent_Architect -.->|调用专属工具| Tool_Time
+ 
+    %% 2. 并发双源取证
     State -->|2. 并行多路调度| Agent_WebScout
     State -->|2. 并行多路调度| Agent_RAGScout
 
     %% 网页探路者工具流
-    Agent_WebScout -.->|调用工具| Tool_Tavily
+    Agent_WebScout -.->|调用| Tool_Tavily
+    Agent_WebScout -.->|调用| Tool_Amap
     Tool_Tavily <-->|urllib HTTP POST| Ext_Tavily
-    Agent_WebScout -.->|抓取特定URL原文| Tool_WebScrape
     
     %% 本地向量探路者工具流
-    Agent_RAGScout -.->|调用工具| Tool_Milvus
-    Tool_Milvus <-->|向量内积检索| Ext_Milvus
+    Agent_RAGScout -.->|调用| Tool_Milvus
+    Tool_Milvus <-->|Window Buffer 缝合| Ext_Milvus
 
     %% 取证数据写入状态
     Tool_Tavily -->|累加网页证据 web_evidence| State
-    Tool_Milvus -->|累加本地证据 local_evidence| State
+    Tool_Milvus -->|累加本地数据 local_evidence| State
 
-    %% 4. 证据链裁判与事实收拢
+    %% 3. 证据链裁判与事实收拢
     State -->|3. 汇聚双源成果| Agent_Judge
     Agent_Judge -.->|调用工具| Tool_Score
-    Tool_Score -->|生成裁判证据池 evidence_pool & 索引 source_index| State
+    Tool_Score -->|生成裁判证据池 evidence_pool| State
 
-    %% 5. 结论归纳与缺口评估
+    %% 4. 结论归纳与缺口评估
     State -->|4. 读取裁判事实| Agent_Analyst
+    Agent_Analyst -.->|调用工具| Tool_Data
     Agent_Analyst -->|needs_more_research == True 【存在缺口】| Agent_Planner
     Agent_Analyst -->|needs_more_research == False 【完备收敛】| Agent_Writer
 
-    %% 6. 缺口反思补搜环路
-    Agent_Planner -.->|调用工具| Tool_Optimize
-    Tool_Optimize -->|生成补搜计划 supplementary_queries| State
-    Agent_Planner -->|迭代次数增加1, 重新并行取证| Agent_WebScout
-    Agent_Planner -->|迭代次数增加1, 重新并行取证| Agent_RAGScout
+    %% 5. 缺口反思补搜环路
+    Agent_Planner -->|迭代次数自增, 重新并行取证| Agent_WebScout
+    Agent_Planner -->|迭代次数自增, 重新并行取证| Agent_RAGScout
 
-    %% 7. 研报大作合成与净化
-    Agent_Writer -.->|调用工具| Tool_Clean
+    %% 6. 研报长文撰写与画图
+    Agent_Writer -.->|调用工具| Tool_Sandbox
     Agent_Writer -.->|调用工具| Tool_Render
-    Tool_Render <-->|物理去重/映射合并| Ext_Postgres
-    Tool_Clean -->|物理抹除胡编死链| Agent_Writer
-    Agent_Writer -->|拼接正文、文献附录与检索轨迹| State
+    Tool_Render <-->|持久化研报 & 沉淀| Ext_SQLite
+    Agent_Writer -->|拼接正文与文献附录| State
 
-    %% 连接线美化
+    %% 样式美化
     linkStyle 0 stroke:#3182ce,stroke-width:2px;
-    linkStyle 2 stroke:#e53e3e,stroke-width:2px;
-    linkStyle 3 stroke:#2b6cb0,stroke-width:2px;
-    linkStyle 6 stroke:#319795,stroke-width:2px;
-    linkStyle 7 stroke:#319795,stroke-width:2px;
-    linkStyle 10 stroke:#38a169,stroke-width:2px;
-    linkStyle 11 stroke:#38a169,stroke-width:2px;
-    linkStyle 15 stroke:#dd6b20,stroke-width:2px;
-    linkStyle 16 stroke:#dd6b20,stroke-width:2px;
-    linkStyle 19 stroke:#e53e3e,stroke-width:2px,stroke-dasharray: 5 5;
-    linkStyle 20 stroke:#2b6cb0,stroke-width:2px;
-```
-
-
-### 多智能体协同矩阵 (Multi-Agent Cooperation Matrix)
-
-| 智能体角色 (Persona) | 对应图节点 | 协同位置与职责 (Cooperation Purpose) | 绑定的物理工具与流程 (Tool & Process) |
-| :--- | :--- | :--- | :--- |
-| **【意图分流专家】**<br>Intent Router | `intent_node` | **流水线防卫门卫**。极速判别用户意图是日常闲聊、常识提问，还是严肃技术调研。过滤低价值计算，防止多智能体图网络爆 Token。 | 调用 `detect_intent()` 规则匹配与正则雷达扫描。未命中的复杂问题调用大底座生成 JSON 路由。 |
-| **【极速直答专家】**<br>Direct Responder | `direct_answer_node` | **对话闪电侠**。对于日常打招呼、打趣或极简常识，直接生成回复并流转至 `[END]`，绕过繁复的检索，保障毫秒级体验。 | 直接调用大语言模型（LLM）生成拟人化对话，不执行任何外部检索。 |
-| **【总规划师】**<br>Chief Architect | `plan_node` | **调研航线指挥官**。将复杂查询深度拆解为多章节研究大纲、多条衍生子问题与检索预算，在后台生成初始全景图检索大图景。 | 调用 `_derive_search_plan()`，将模型产出的大纲自动派生成结构化的 `search_plan` 计划表写入状态机。 |
-| **【网页侦查兵】**<br>Web Scout | `web_search_node` | **网络侧取证先锋**。负责拿着被分发好的子检索词，在浩瀚的互联网上高速拉取事实证据，并过滤广告和低信誉站点。 | 调用 `tavily_web_search_records()` 进行 REST 检索；高频调用 `extract_url_content_stub()` 网页正文提取器做内容深度爬取。 |
-| **【局内侦查兵】**<br>Local RAG Scout | `local_rag_node` | **私有库取证先锋**。与网页侦查兵并行工作，负责在企业内部向量数据库（Milvus）中进行语义相似性检索，挖出机密数据。 | 调用 `search_knowledge_base_records()` 建立 Milvus 向量连接，通过内积计算召回高可信内部文档切片。 |
-| **【信源裁判官】**<br>Evidence Judge | `deep_dive_node` | **事实核验大法官**。将双路并发搜集回来的证据聚拢，剔除重复项，并根据官方/学术/自媒体等信源背书计算信用分，审计冲突点。 | 调用 `_score_evidence()` 执行信源分级打分评级算法；调用 `_fallback_audit()` 建立静默规则审计，生成风险红牌 `audit_flags`。 |
-| **【分析师】**<br>Analyst | `analyze_node` | **逻辑整合决策大脑**。阅读裁判后的干净证据，归纳出 Findings 核心论断列表。深度审计当前信息是否完备，控制循环开关。 | 将断言与其对应的文献 `source_id` 实施强绑定。判断并决定全局布尔门阈 `needs_more_research` 的状态。 |
-| **【补搜规划专家】**<br>Research Planner | `reflect_node` | **纠偏与战术补给员**。当分析师抛出信息缺口后被激活。反思已检索历史和缺口内容，重新改写更靶向的检索词推进下轮迭代。 | 调用 `optimize_query()` 检索词改写引擎。生成 `supplementary_queries` 并自增 `iteration` 轮次计数器。 |
-| **【终审写作者】**<br>Senior Writer | `write_node` | **总撰稿人与安全终审官**。将所有裁判事实 findings 扩写为两三千字的严谨 Markdown 研报，执行文献引用的终极净化。 | 调用 `_validate_and_fix_citations()` 正则物理抹除幻觉引用死链；调用 `_ensure_reference_section()` 自动渲染文末去重文献清单。 |
-
----
-
-## 二、 Tavily 网页取证与证据清洗过滤流水线 (Tavily Search & Evidence Pipeline)
-
-展示了 `WebScout` 智能体如何调用 Tavily 接口，并对其进行实体高相关粗筛、JSON 精筛、双重去重回补以及合法引用索引沉淀的完整数据处理流水线：
-
-> [!NOTE]
-> **设计与工程实现集成说明**：
-> 在系统架构设计上，网页取证提供了严格且完备的语义与实体相关性碰撞评估机制（`_filter_web_records` 和 `_filter_local_records`）。在实际生产环境部署中，系统提供并默认启用了更轻量级、响应极致高速的非空过滤层 `_minimal_record_filter`。这既能在大样本场景下物理阻断空字段，又能实现超低时延与零计算消耗，与大模型精筛（`_invoke_json_agent`）完美互补。
-
-```mermaid
-graph TD
-    classDef process fill:#ebf8ff,stroke:#2b6cb0,stroke-width:1.5px,color:#1a202c;
-    classDef data fill:#fffaf0,stroke:#dd6b20,stroke-width:2px,color:#1a202c;
-    classDef ext fill:#e6fffa,stroke:#319795,stroke-width:1.5px,color:#1a202c;
-
-    Raw_Query["1. nodes.py: 提取子问题搜索 Query"]:::process
-    Tavily_Search["2. tools.py: tavily_web_search_records【】"]:::process
-    Tavily_Endpoint["Tavily Search Cloud Service 【POST】"]:::ext
-    
-    subgraph Pipeline_Cleaning ["3. 证据多级清洗与高相关过滤流水线"]
-        RegEx_Domain["URL 顶级域名反解 【Domain Extraction】"]:::process
-        Keyword_Filter["_filter_web_records / _minimal_record_filter 【召回粗筛与过滤】"]:::process
-        LLM_Audit["_invoke_json_agent 【大模型 JSON 高相关性精筛】"]:::process
-        Prune_Step["_prune_evidence_to_allowed_sources 【非法引用 ID 强力裁剪】"]:::process
-        Enrich_Step["_enrich_evidence_from_raw 【原始 API 字段智能回补】"]:::process
-    end
-
-    State_Pool["ResearchState: web_evidence与source_index"]:::data
-
-    Raw_Query --> Tavily_Search
-    Tavily_Search <-->|urllib HTTP POST| Tavily_Endpoint
-    Tavily_Search --> RegEx_Domain
-    RegEx_Domain --> Keyword_Filter
-    Keyword_Filter -->|过滤相关性评分 < 0.2 数据| LLM_Audit
-    LLM_Audit -->|大模型剔除不相关 WEB-ID| Prune_Step
-    Prune_Step -->|从原始 API 数据回补 url/title 字段| Enrich_Step
-    Enrich_Step -->|写入证据池与合法文献索引| State_Pool
-
-    linkStyle 1 stroke:#319795,stroke-width:2px;
-    linkStyle 4 stroke:#e53e3e,stroke-width:1.5px;
-    linkStyle 5 stroke:#dd6b20,stroke-width:1.5px;
-    linkStyle 6 stroke:#38a169,stroke-width:2px;
+    linkStyle 3 stroke:#e53e3e,stroke-width:2px;
+    linkStyle 4 stroke:#2b6cb0,stroke-width:2px;
+    linkStyle 13 stroke:#38a169,stroke-width:2px;
+    linkStyle 14 stroke:#38a169,stroke-width:2px;
 ```
 
 ---
 
-## 三、 存储底座多维度逻辑隔离规范 (Data Storage Isolation Spec)
+## 📂 项目工作区目录规范
 
-当多个 Agent 系统（例如外部 `cloud_agent` 客服系统）共享相同的物理数据库/缓存实例时，本系统在环境配置层面实现了**全维度的逻辑隔离**，保障生产环境下数据的一致性与高并发下的 Key 隔离。
-
-| 存储中间件 | 作用层级 | 源项目配置 (cloud_agent) | 当前项目隔离配置 (deep_research) | 逻辑隔离技术实现原理 |
-| :--- | :--- | :--- | :--- | :--- |
-| **Redis** | 短期会话级 Checkpoint 状态缓存 | `redis://...:6379` (默认 DB 0) | **`redis://...:6380` (端口 6380 独立实例)** | **物理端口/实例隔离**：放弃修改逻辑 DB 索引为 `/1`，直接将 Redis 连接端口更改为物理隔离的 `6380` 实例，实现完全独立的物理缓存区。 |
-| **PostgreSQL** | 长期会话 Checkpointer 与语义实体 | MySQL 物理库 `mydb` | **`postgresql://...:5432/deep_research_db`** | **Schema / 库级物理隔离**：在 PostgreSQL 实例中建立专用的 `deep_research_db`，使长周期记忆及轨迹表彻底与源项目的业务库解耦。 |
-| **Milvus** | 企业内部语义切片向量知识库 | `MILVUS_COLLECTION=mult_agent_memory2` | **`MILVUS_COLLECTION=deep_research_memory`** | **集合 (Collection) 级隔离**：在 Milvus 向量引擎中创建专属的 `deep_research_memory` 向量集合，彻底物理隔离 RAG 数据集，保证检索高精确。 |
-
----
-
-## 四、 多智能体架构跨文件全景执行流程 (Cross-File Execution Flow Walkthrough)
-
-整个 DeepResearch 调研任务的执行流在系统各层代码文件之间呈严密的**时间线流转（Chronological Flow）**。以下是全景跨文件执行轨迹的深度解析：
-
-### 1. 系统引导与网关唤醒阶段 (Bootloader & HTTP Phase)
-1.  **引导入口**：用户在 Shell 运行 `main.py` 或启动 FastAPI 服务 [app_main.py](file:///d:/AI/deep_research/deep_research/app/app_main.py)。
-2.  **环境装载**：`_bootstrap()` 函数被激活，解析 [.env](file:///d:/AI/deep_research/deep_research/.env)（获取获取去除了引号污染的 DashScope Key、Tavily Key 及物理端口隔离的 Redis/Postgres 配置），并使用 `sys.path.insert(0, str(src))` 将 `app/` 注册到 Python 系统路径。
-3.  **网关开启**：[app_main.py](file:///d:/AI/deep_research/deep_research/app/app_main.py) 装载 [research_router.py](file:///d:/AI/deep_research/deep_research/app/backend/router/research_router.py)，启动 FastAPI 服务。
-4.  **前端请求**：用户通过 Vue 界面 [App.vue](file:///d:/front/agent_front/src/App.vue) 提问，发送 HTTP POST 至 `/api/v1/research/stream`，网关路由拦截请求并开始执行桥接。
-
-### 2. 多路复用桥接与记忆注入阶段 (Bridge & Memory Phase)
-1.  **唤醒服务**：`research_router.py` 将负载直接传递给 [workflow_service.py](file:///d:/AI/deep_research/deep_research/app/backend/service/workflow_service.py) 的 `WorkflowService.stream_events` 异步生成器。
-2.  **构建环境**：服务执行 `_ensure_initialized()`：
-    *   读取静态配置 [config.json](file:///d:/AI/deep_research/deep_research/config.json) 获取硬隔离的 Milvus 集合名称和 6380 端口物理隔离 Redis 实例；
-    *   装载并实例化 `MemoryManager`；
-    *   调用 `build_agents()` 初始化 Qwen 模型大底座，绑定专有系统人设（[prompts.py](file:///d:/AI/deep_research/deep_research/app/mult_agents/prompts.py)）；
-    *   构建 PostgreSQL 连接上下文，作为会话的 `Checkpointer`。
-3.  **记忆注入**：`WorkflowService` 调度 `MemoryManager` 触发跨会话记忆检索，在关系库中查出先前的用户偏好并格式化为 `memory_context`。
-4.  **状态沙盒初置**：调用 [state.py](file:///d:/AI/deep_research/deep_research/app/mult_agents/state.py) 的 `create_initial_state` 工厂函数，将 `query`、`user_id`、`tenant_id` 及 `memory_context` 封装成标准字典，装载入 LangGraph 状态机沙盒。
-5.  **拉起 Worker 线程**：创建同步工作流执行线程，在后台启动 `workflow.stream()`，同时主事件循环异步监听 `asyncio.Queue`。
-
-### 3. 多智能体拓扑执行阶段 (State Machine Execution Phase)
-LangGraph 驱动以下节点在 [nodes.py](file:///d:/AI/deep_research/deep_research/app/mult_agents/nodes.py) 和 [tools.py](file:///d:/AI/deep_research/deep_research/app/mult_agents/tools.py) 之间高速流转：
-
-#### Ⅰ. 意图分流与大纲规划 (`intent_node` & `plan_node`)
-*   `intent_node` 结合规则正则与大模型推理，决定将任务直接派发给 `direct_answer_node`（返回直答并 `END`）还是流转至 `plan_node`。
-*   `plan_node` 扮演总架构师，调用 [prompts.py](file:///d:/AI/deep_research/deep_research/app/mult_agents/prompts.py) 的 `"plan"` 系统提示词产生任务规划。随后调用 `_derive_search_plan` 生成多章节的**结构化搜索计划**并写入状态中的 `search_plan`。
-
-#### Ⅱ. 双源并发网页与知识库取证 (`web_search_node` & `local_rag_node`)
-*   `web_search_node` 读取 `search_plan`：
-    *   提取搜索词，循环调用 [tools.py](file:///d:/AI/deep_research/deep_research/app/mult_agents/tools.py) 的 **`tavily_web_search_records`**。
-    *   Tavily 搜索引擎通过 `urllib` 标准库的 HTTP POST 抓取最新的互联网资讯返回；
-    *   代码在 `tools.py` 内部计算 `domain`，返回到节点后由大模型进行 JSON 精筛（`_invoke_json_agent`）。
-    *   执行 `_enrich_evidence_from_raw` 字段回补，并将清洗去重后的成果累加进状态中的 `web_evidence`。
-*   同时，`local_rag_node` 在另一个并发管道中并发调用 [tools.py](file:///d:/AI/deep_research/deep_research/app/mult_agents/tools.py) 的 `search_knowledge_base` 检索私有向量库（[rag/core.py](file:///d:/AI/deep_research/deep_research/app/mult_agents/rag/core.py)），召回企业内部机密文档作为补充证据，累加至 `local_evidence`。
-*   网关在每完成一个节点计算时，向 `asyncio.Queue` 发生包含当前执行说明（如 `[web_search] Web Scout 正在检索网络证据`）的更新字典。
-
-#### Ⅲ. 证据链评分裁判与事实提炼 (`deep_dive_node` & `analyze_node`)
-*   `deep_dive_node` 汇集双源证据，扮演 EvidenceJudge 审查员角色，根据域名解析特征执行**证据基准可信度打分算法**（本地 RAG 享 0.92 分，权威 gov/edu 享 0.88 分，自媒体享极低分），并对冲突与低置信度数据打上 `audit_flags` 风险标记，最终凝聚成 `evidence_pool` 和合法文献索引 `source_index`。
-*   `analyze_node` 读取证据事实数据库，提炼生成 findings 核心论断列表，并评估信息完备性。
-
-#### Ⅳ. 缺口反思环路 (`reflect_node`)
-*   如果 `Analyst` 发现核心问题依然存在信息缺口，会将 `needs_more_research` 设为 `True`，并向状态写入 `missing_gaps`。
-*   在条件路由的判定下，工作流重定向至 `reflect_node`：
-    *   智能体基于已执行过的搜索历史和缺口内容，重新改写生成新的更靶向的检索 Query，写入 `supplementary_queries`。
-    *   工作流 `iteration` 次数递增，重新流转回网络取证与本地 RAG 节点，开启新一轮的取证。
-
-#### Ⅴ. 研报长文撰写与引用自动清洗校验 (`write_node`)
-*   当状态判定满足收敛条件（无缺口或迭代超限）后，流转至 `write_node`。
-*   **上下文清空连接**：为了防止累积的大量 JSON 带偏模型，节点只喂给模型当前子问题的 findings、可引用的 source_index 列表及纯文本指令。
-*   **正文草稿生成**：SeniorWriter 智能体调用大语言模型进行长文扩写。
-*   **合法性引用检验**：调用 `_validate_and_fix_citations`，利用正则反向提取正文中的所有引用 ID，删除模型虚构的死链，回补并渲染文末 `## 参考资料`。
-*   **合并最终研报**：合并正文与文献列表，写入状态中的 `final`。
-
-### 4. 拆线落库与客户端响应阶段 (Teardown & Rendering Phase)
-1.  **会话后持久化**：LangGraph 执行完毕，`WorkflowService` 捕获终稿。
-    *   调用短期 `Checkpointer`，将物理会话 Checkpoint 异步写入物理隔离的 `Redis Port 6380` 独立实例空间；
-    *   调用 `MemoryManager.persist_turn()`，将本次用户交互及产出的高品质研报在后台多线程异步落库至 PostgreSQL 长期情景表中，丰富情景记忆。
-2.  **最终事件回传**：服务向 `asyncio.Queue` 注入 `type: 'final'` 标记包，关闭异步生成器，FastAPI 将最后的事件流推送至前端。
-3.  **前端交互渲染**：Vue 前台 [App.vue](file:///d:/front/agent_front/src/App.vue) 结束骨架屏进度日志展示，将 `final` 研报字段通过自定义 Markdown 引擎动态高亮高品质展示，整个深度调研任务闭环结束。
+```
+d:/AI/deep_research/deep_research/
+├── app/
+│   ├── backend/                 # FastAPI Web 服务端
+│   │   ├── config/              # settings.py 配置（基于 Pydantic Settings）
+│   │   ├── router/              # API 路由器（health_router, research_router sse流）
+│   │   ├── schemas/             # Pydantic 数据校验对象（health, research）
+│   │   └── service/             # 单例服务提供者 workflow_service.py（LangGraph 调度器）
+│   ├── mult_agents/             # 多智能体大脑引擎
+│   │   ├── memory/              # 双层记忆子系统
+│   │   │   ├── base.py          # 记忆实体模型与内存字典默认实现
+│   │   │   ├── short_term.py    # 带有消息自动 UUID 生成的短期对话缓冲区
+│   │   │   ├── long_term.py     # SQLite 长期语义与情节记忆数据库
+│   │   │   ├── manager.py       # 统一记忆网关与 DeepSeek 摘要引擎
+│   │   │   └── utils.py         # 认知提取专家（LLM + 正则降级）
+│   │   ├── rag/                 # RAG 本地检索系统
+│   │   │   ├── core.py          # RAGSystem (Window Buffer 检索与一致性防线)
+│   │   │   └── ingest.py        # 离线知识递归入库引擎
+│   │   ├── config.py            # 全局 AppConfig 加载器
+│   │   ├── graph.py             # 偏函数节点绑定与 LangGraph 拓扑编排
+│   │   ├── main.py              # 命令行启动入口与全量工具专属分配中心
+│   │   ├── nodes.py             # 专家节点高阶业务控制（JSON 解析与大纲派生）
+│   │   ├── prompts.py           # 专家系统提示词定义
+│   │   ├── state.py             # 状态沙盒结构定义
+│   │   └── tools.py             # 全量物理工具定义（沙箱/数据/高德地图/SQL等）
+│   └── app_main.py              # FastAPI 启动总装载脚本
+├── config.json                  # 静态配置文件
+├── requirements.txt             # 生产环境依赖列表
+└── README.md                    # 技术全景指南说明文档
+```
 
 ---
 
-## 五、 Tavily 智能网搜集成规范 (Tavily Search Spec)
+## ⚙️ 环境配置与部署规范
 
-本系统使用全球领先的学术及开发者智能搜索引擎 **Tavily Search API** 作为默认网页取证内核。
+### 1. 配置文件 `config.json`
+用于托管 Milvus、Redis 物理端口等静态底层参数：
+```json
+{
+  "milvus_host": "127.0.0.1",
+  "milvus_port": 19530,
+  "milvus_collection": "deep_research_memory",
+  "short_term_backend": "postgres",
+  "long_term_backend": "sqlite",
+  "long_term_scope": "user",
+  "checkpointer_backend": "auto"
+}
+```
 
-### 1. Tavily 零外部包依赖设计 (Zero-Dependency API Wrapper)
-为了确保核心代码的轻量化与极致可移植性，系统摒弃了 `tavily-python` SDK 包装，转而使用 Python 内建标准库 `urllib` 实现高并发网络适配器。
+### 2. 环境变量 `.env`
+在项目根目录下创建 `.env` 文件，用于填充敏感凭证与跨项目隔离配置：
+```env
+# 核心大模型大底座与向量模型（DashScope 通义千问）
+DASHSCOPE_API_KEY="your_dashscope_api_key"
 
-#### 请求-响应 Schema 映射规格
-*   **API 终结点 (Endpoint)**: `https://api.tavily.com/search`
-*   **请求方法 (Method)**: `POST`
-*   **请求负载 (Request Body JSON)**:
-    ```json
-    {
-      "api_key": "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",
-      "query": "search query",
-      "max_results": 4
-    }
-    ```
-*   **响应负载 (Response JSON)**:
-    ```json
-    {
-      "results": [
-        {
-          "title": "Title of Web Page",
-          "url": "https://example.com/subpath",
-          "content": "Core snippet of context parsed by Tavily search engine...",
-          "score": 0.9821
-        }
-      ]
-    }
-    ```
-*   **域名解析过滤**:
-    代码使用内建的字符串切片与正则对 `url` 进行反解，动态抽取出二级或顶级域名 `domain`，提供给信源打分模型：
-    ```python
-    # 域名反解逻辑示例
-    url = "https://www.official-report.gov.cn/ai-agent-2026"
-    domain = url.split("://", 1)[1].split("/", 1)[0]
-    # 解析结果：domain = "www.official-report.gov.cn"
-    ```
+# 生产级大模型记忆提炼引擎（DeepSeek）
+DEEPSEEK_API_KEY="sk-your_deepseek_api_key"
+DEEPSEEK_MODEL="deepseek-chat"
+
+# 网页取证搜索引擎 Key
+TAVILY_API_KEY="tvly-your_tavily_key"
+
+# 长期情景/会话存储 PostgreSQL（Schema级别隔离）
+POSTGRES_DSN="postgresql://postgres:password@127.0.0.1:5432/deep_research_db"
+
+# 高端地图服务密钥（用于网页侦查兵定位规划）
+AMAP_API_KEY="your_amap_api_key"
+
+# 物理硬隔离的 Redis 端口实例配置
+REDIS_URL="redis://:password@127.0.0.1:6380/0"
+```
+
+---
+
+## 🚀 快速启动指南
+
+### 1. 离线知识库入库 (RAG Ingestion)
+要为局内侦查兵准备本地参考资料，将待入库的 Markdown 或文本文件放入路径，运行：
+```bash
+# 激活虚拟环境后，在根目录下执行
+python app/mult_agents/rag/ingest.py
+```
+系统会自动进行 500 字切片、50 字重叠，并调用通义千问 Embedding 写入 Milvus 中。
+
+### 2. 启动 CLI 交互式终端 (Chat Loop)
+在终端里直接与整个多智能体集群进行交互：
+```bash
+python app/mult_agents/main.py
+```
+* **单次快捷查询**：`python app/mult_agents/main.py --once-query "分析大模型记忆系统"`
+* **自检长期记忆**：在聊天中输入 `/memory` 查看当前用户已沉淀 Facts/Prefs 的统计。
+* **自检向量链路**：在聊天中输入 `/memory-trace` 查看向量搜索引擎的召回 Trace 明细。
+
+### 3. 启动 FastAPI Web 服务端 (Web Gateway)
+为前端提供极速响应的 SSE 事件流网关：
+```bash
+python app/app_main.py
+```
+服务默认绑定在 `0.0.0.0:8000`。
+* **极速直答接口**：`POST /api/v1/research/run`
+* **SSE 流式实时流接口**：`POST /api/v1/research/stream`，支持将 `phase`、`node` 状态机轨迹与 Markdown 最终报告无缝推送给前端展示。
+
+### 4. 运行全系统集成测试
+运行我们编写的完整记忆与提取验证测试套件：
+```bash
+python C:\Users\lenovo\.gemini\antigravity\brain\ddee3a42-4f58-4122-b77e-99ee42892b4f\scratch\test_memory_system.py
+```
+*(该脚本将自动对内存、长期 SQLite 数据库的增删改查以及 DeepSeek 生产级同步提炼链路进行全功能自动化跑通校验)*
+
+---
+
+## 🛡️ 数据逻辑安全与隐私合规
+
+本项目在设计上完全符合现代企业数据合规与隐私保护标准：
+1. **防范 SQL 注入与高危拦截**：`sql_inter` 工具内部集成了强力的只读静态安全检查，**严格只允许 SELECT / WITH 开头的静态只读查询**，物理上拦截了所有的 `DROP`、`DELETE`、`UPDATE` 等指令。
+2. **沙箱安全执行屏蔽**：`python_inter` 沙箱内置了高危内置函数与模块阻断（封禁了 `os`、`sys`、`subprocess`、`socket` 以及 `getattr/setattr` 等），有效防范恶意代码对系统的入侵。
+3. **完全“被遗忘权（Right to be Forgotten）”**：通过内置的 `clear_user_memory` 管理面接口，能一键安全抹除特定用户在系统所有物理存储（SQLite, Redis, Milvus）中的完整数字足迹。
