@@ -23,7 +23,7 @@ if env_path.exists():
 
 
 
-INPUT_PATH = Path("/Users/pengshaoyong/Documents/AI_Project/mult_agent/mult_agents_memory/README.md")
+INPUT_PATH = Path(r"D:\研究生毕设LORA+MOE\专家修改")
 COLLECTION_NAME = ""
 MILVUS_HOST = ""
 MILVUS_PORT = 0

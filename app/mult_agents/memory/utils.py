@@ -54,17 +54,20 @@ def create_memory_checkpoint(
 def extract_memory_from_messages(
     messages: List[BaseMessage],
     extract_facts: bool = True,
-    extract_preferences: bool = True
+    extract_preferences: bool = True,
+    llm: Optional[Any] = None
 ) -> Dict[str, List[str]]:
     """
     从消息中提取可记忆的信息
     
-    简单的规则提取，实际生产环境可以使用 LLM 进行更智能的提取
+    实际生产环境支持使用 LLM 进行高精度的结构化信息提取，
+    如果未提供 LLM 客户端，或者 API 调用失败，自动平滑退避降级为本地规则引擎抽取。
     
     Args:
         messages: 消息列表
         extract_facts: 是否提取事实
         extract_preferences: 是否提取偏好
+        llm: 可选大语言模型客户端实例
         
     Returns:
         提取的记忆，按类型分类
@@ -75,6 +78,70 @@ def extract_memory_from_messages(
         "tasks": [],
     }
     
+    if not messages:
+        return memories
+
+    # A. 实际生产环境：优先使用 LLM 执行高质量的结构化 JSON 抽取
+    if llm is not None:
+        try:
+            from langchain_core.messages import SystemMessage, HumanMessage
+            
+            # 将对话消息组合为文本片段以供提取
+            segment_lines = []
+            for msg in messages:
+                role = "用户" if msg.type == "human" else "助手"
+                segment_lines.append(f"{role}: {msg.content}")
+            segment_text = "\n".join(segment_lines)
+            
+            system_prompt = (
+                "你是一个多智能体记忆系统的【认知提取专家】。\n"
+                "请仔细分析给出的用户与助手的对话片段，从中抽取出关于该用户的长期静态事实（facts）与行为/环境偏好（preferences）。\n"
+                "要求：\n"
+                "1. 事实（facts）：如用户的姓名、职业、所在地等。句子需以第三人称开头，如 '用户目前在上海工作'。\n"
+                "2. 偏好（preferences）：如特殊习惯、喜欢的语言风格、要求等。如 '用户只喜欢喝绿茶'。\n"
+                "3. 必须输出为以下严格的 JSON 格式，不能包含任何 Markdown 格式包裹（不要包含 ```json），不要有任何解释文字：\n"
+                '{"facts": ["事实1", "事实2"], "preferences": ["偏好1", "偏好2"]}'
+            )
+            
+            # 使用 hasattr 兼容 LangChain 新旧版本的不同接口（invoke 与 predict_messages）
+            if hasattr(llm, "invoke"):
+                response = llm.invoke([
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=f"对话片段：\n{segment_text}")
+                ])
+            else:
+                response = llm.predict_messages([
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=f"对话片段：\n{segment_text}")
+                ])
+                
+            raw_text = response.content.strip()
+            # 剥离可能包含的 markdown json 标签
+            if raw_text.startswith("```"):
+                lines = raw_text.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                raw_text = "\n".join(lines).strip()
+                
+            parsed = json.loads(raw_text)
+            if extract_facts:
+                memories["facts"] = parsed.get("facts", [])
+            if extract_preferences:
+                memories["preferences"] = parsed.get("preferences", [])
+                
+            logger.info("[memory] LLM-based memory extraction succeeded | facts=%d preferences=%d", len(memories["facts"]), len(memories["preferences"]))
+            
+            # 去重并直接返回
+            memories["facts"] = list(set(memories["facts"]))
+            memories["preferences"] = list(set(memories["preferences"]))
+            return memories
+        except Exception as exc:
+            logger.warning("[memory] LLM-based memory extraction failed, fallback to rule engine: %s", exc)
+            # LLM 提取异常，继续向下执行本地规则匹配兜底
+            
+    # B. 本地规则降级防线：采用正则表达式与特定关键词初筛
     for msg in messages:
         content = str(msg.content)
         sentences = [item.strip() for item in re.split(r"[。！？!?\n；;]", content) if item.strip()]
@@ -83,7 +150,6 @@ def extract_memory_from_messages(
         
         # 提取事实（包含"是"、"有"等判断的句子）
         if extract_facts:
-            # 简单的规则：包含特定关键词的句子
             fact_keywords = ["是", "有", "位于", "成立于", "负责", "使用", "叫", "my name is", "i am", "i'm"]
             for keyword in fact_keywords:
                 if keyword in content.lower():
@@ -107,6 +173,7 @@ def extract_memory_from_messages(
     memories["preferences"] = list(set(memories["preferences"]))
     
     return memories
+
 
 
 def format_memories_for_prompt(memories: List[MemoryEntry], max_length: int = 2000) -> str:

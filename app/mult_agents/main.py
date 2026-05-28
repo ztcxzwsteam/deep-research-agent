@@ -24,7 +24,32 @@ from .graph import build_app as build_workflow_app
 from .memory import MemoryManager
 from .prompts import PROMPTS
 from .state import ResearchState, create_initial_state
-from .tools import init_rag_system
+from .tools import (
+    init_rag_system,
+    web_search_stub,
+    local_docs_lookup_stub,
+    get_current_time,
+    simple_calculator,
+    extract_data_stub,
+    sql_inter,
+    python_inter,
+    execute_terminal_command,
+    fig_inter,
+    amap_weather,
+    amap_geocode,
+    amap_poi_search,
+    amap_route_plan,
+    safe_list_dir,
+    safe_read_file,
+    safe_write_file,
+    safe_move_file,
+    file_operation_stub,
+    extract_requirements,
+    outline_from_topics,
+    merge_notes,
+    summarize_points,
+    dedupe_lines
+)
 from .rag.core import RAGConfig
 
 
@@ -457,16 +482,46 @@ def build_agents(model: str, api_key: str, config: AppConfig) -> AgentBundle:
     deepseek_key = getattr(config, "deepseek_api_key", None) or os.getenv("DEEPSEEK_API_KEY")
     deepseek_model = getattr(config, "deepseek_model", None) or os.getenv("DEEPSEEK_MODEL") or "deepseek-chat"
 
-    # 去掉每个 Agent 强制绑定的 tools，只做信息抽取，降低 System Prompt 长度
+    # 全量工具针对性分流绑定，实现极致的多智能体工程协作！
     return AgentBundle(
-        intent_router=build_agent(model, api_key, "intent_router", 0.0, [], deepseek_key, deepseek_model),
-        planner=build_agent(model, api_key, "plan", 0.3, [], deepseek_key, deepseek_model),
-        scout_web=build_agent(model, api_key, "web_search", 0.4, [], deepseek_key, deepseek_model),
-        scout_local=build_agent(model, api_key, "local_rag", 0.4, [], deepseek_key, deepseek_model),
+        # 1. 意图路由器与总规划师绑定“时间工具”
+        intent_router=build_agent(model, api_key, "intent_router", 0.0, [get_current_time], deepseek_key, deepseek_model),
+        planner=build_agent(model, api_key, "plan", 0.3, [get_current_time], deepseek_key, deepseek_model),
+        
+        # 2. 网页搜集器拥有：全网搜索、高德地图四件套（天气、定位、周边、驾车规划）
+        scout_web=build_agent(
+            model, api_key, "web_search", 0.4, 
+            [web_search_stub, amap_weather, amap_geocode, amap_poi_search, amap_route_plan], 
+            deepseek_key, deepseek_model
+        ),
+        
+        # 3. 本地搜集器拥有：私有知识库检索工具
+        scout_local=build_agent(model, api_key, "local_rag", 0.4, [local_docs_lookup_stub], deepseek_key, deepseek_model),
+        
         evidence_judge=build_agent(model, api_key, "deep_dive", 0.2, [], deepseek_key, deepseek_model),
-        analyst=build_agent(model, api_key, "analyze", 0.3, [], deepseek_key, deepseek_model),
+        
+        # 4. 推理分析器拥有：精确计算器、Pandas CSV/Excel加载器、SQL数据库只读客户端
+        analyst=build_agent(
+            model, api_key, "analyze", 0.3, 
+            [simple_calculator, extract_data_stub, sql_inter], 
+            deepseek_key, deepseek_model
+        ),
+        
+        # 5. 代码生成器拥有：Python 沙箱环境、安全文件读写与移动工具、受限终端白名单命令执行器
+        codegen=build_agent(
+            model, api_key, "codegen", 0.1, 
+            [python_inter, safe_list_dir, safe_read_file, safe_write_file, safe_move_file, file_operation_stub, execute_terminal_command], 
+            deepseek_key, deepseek_model
+        ),
+        
         direct_responder=build_agent(model, api_key, "direct_answer", 0.2, [], deepseek_key, deepseek_model),
-        writer=build_agent(model, api_key, "write", 0.4, [], deepseek_key, deepseek_model),
+        
+        # 6. 报告撰写器拥有：高保真 Matplotlib/HTML 画图工具、文本去重提炼合并工具套件
+        writer=build_agent(
+            model, api_key, "write", 0.4, 
+            [fig_inter, extract_requirements, outline_from_topics, merge_notes, summarize_points, dedupe_lines], 
+            deepseek_key, deepseek_model
+        ),
     )
 
 

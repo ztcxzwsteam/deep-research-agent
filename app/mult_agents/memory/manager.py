@@ -648,6 +648,7 @@ class MemoryManager:
     def get_short_term_metadata(self, thread_id: str) -> Dict[str, Any]:
         return self.short_term.get_thread_metadata(thread_id)
 
+    # 彻底清除会话短期记忆
     def clear_short_term(self, thread_id: str) -> bool:
         if self.short_term_backend == "redis" and self._redis_client is not None:
             keys = self._redis_client.keys(f"ma:short:*:*:{thread_id}")
@@ -664,6 +665,7 @@ class MemoryManager:
                     conn.commit()
         return self.short_term.clear_thread(thread_id)
 
+    # 获取当前的活跃线程集合
     def list_active_threads(self) -> List[str]:
         if self.short_term_backend == "redis" and self._redis_client is not None:
             keys = self._redis_client.keys("ma:short:*:*:*")
@@ -680,6 +682,7 @@ class MemoryManager:
                 return sorted(set(threads))
         return self.short_term.list_active_threads()
 
+    # 用户个性画像多后端双写
     def save_user_profile(
         self,
         user_id: str,
@@ -877,6 +880,7 @@ class MemoryManager:
         )
         return entries
 
+    # 用于在 PostgreSQL 中对结构化与非结构化数据（JSONB）进行模糊匹配和精细过滤的关系型数据库检索方法。
     def _search_postgres(
         self,
         tenant_id: str,
@@ -928,6 +932,7 @@ class MemoryManager:
             )
         return entries
 
+    # 这是长期语义记忆的核心入口 API，负责协调多个检索后端（向量数据库 Milvus、关系型数据库 Postgres、本地轻量库 SQLite），并管理会话级的记忆隔离策略。
     def search_semantic(
         self,
         user_id: str,
@@ -1002,6 +1007,8 @@ class MemoryManager:
         self._annotate_entries_with_source(fallback_entries, source)
         return fallback_entries
 
+    # 该方法负责将智能体的一个任务记录（包括参数 and 结果）存入底层存储，并在向量数据库中创建索引，以便后续能够通过自然语言检索到它。
+    # 将当前智能体运行的任务及其产出作为情境记忆进行双写持久化与向量索引。
     def save_task(
         self,
         user_id: str,
@@ -1047,6 +1054,7 @@ class MemoryManager:
             )
         return memory_id
 
+    # 该方法用于检索某个用户执行任务的时间序列历史。
     def get_task_history(
         self,
         user_id: str,
@@ -1073,6 +1081,7 @@ class MemoryManager:
                 return entries
         return self.episodic.get_task_history(user_id, task_type, limit)
 
+    # 该方法是决策阶段最关键的API。当智能体正准备执行一个任务时，它可以把当前任务的描述（Query）作为参数，在此检索历史上跟当前相似度最高的情境案例。
     def search_similar_tasks(
         self,
         user_id: str,
@@ -1142,6 +1151,7 @@ class MemoryManager:
         self._annotate_entries_with_source(fallback_entries, source)
         return fallback_entries
 
+    # 整个记忆管理系统（MemoryManager）中最具全局视角、集成度最高的公共检索 API —— search_all（全域多维记忆联合检索接口）。
     def search_all(
         self,
         user_id: str,
@@ -1189,6 +1199,7 @@ class MemoryManager:
             ]
         return results
 
+    # 框架的终极编织器与上下文整合器
     def get_context_for_agent(
         self,
         user_id: str,
@@ -1248,6 +1259,7 @@ class MemoryManager:
         )
         return context
 
+    # 整个智能体长期记忆架构的出口网关与终极拼图组装者
     def build_personalized_prompt_context(
         self,
         user_id: str,
@@ -1350,6 +1362,7 @@ class MemoryManager:
     def get_last_trace(self) -> Dict[str, Any]:
         return self._last_trace.copy()
 
+    # 整个记忆管理器的核心状态机，负责在一轮对话结束后对所有记忆维度进行一次性“清算与入库”。
     def persist_turn(
         self,
         tenant_id: str,
@@ -1375,7 +1388,7 @@ class MemoryManager:
             "call me", "i prefer", "i like", "my preference",
         ]
         should_extract_long_term = any(marker in lower_query for marker in remember_markers)
-        extracted = extract_memory_from_messages([user_message]) if should_extract_long_term else {"facts": [], "preferences": []}
+        extracted = extract_memory_from_messages([user_message], llm=self._summary_llm) if should_extract_long_term else {"facts": [], "preferences": []}
 
         def is_valid_candidate(text: str, allow_second_person: bool = False) -> bool:
             normalized = text.strip()
